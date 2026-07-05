@@ -68,7 +68,7 @@
   .opt.sel .key{color:var(--mint);font-weight:700}
   .conf-low .qh .badge{color:var(--amber)}
   .badge{font-family:var(--mono)}
-  #summary{display:none;font-family:var(--mono);font-size:13px;color:var(--dim);margin:16px 0 12px;display:none;justify-content:space-between;align-items:center}
+  #summary{display:none;font-family:var(--mono);font-size:13px;color:var(--dim);margin:16px 0 12px;justify-content:space-between;align-items:center;gap:10px}
   #summary.on{display:flex}
   #err{display:none;border:1px solid var(--red);color:var(--red);border-radius:10px;padding:12px;font-size:13px;margin-top:12px;line-height:1.5}
   #err.on{display:block}
@@ -82,6 +82,8 @@
   label{display:block;font-family:var(--mono);font-size:11.5px;color:var(--dim);margin:14px 0 5px;letter-spacing:.05em;text-transform:uppercase}
   .sheet input,.sheet select{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:9px;color:var(--text);padding:11px 12px;font-size:15px;font-family:var(--mono)}
   .sheet input:focus,.sheet select:focus{outline:none;border-color:var(--mint)}
+  .toggle{display:flex;align-items:center;gap:9px;margin-top:14px;font-family:var(--sans);font-size:13.5px;color:var(--text);text-transform:none;letter-spacing:0}
+  .toggle input{width:auto}
   .rowbtns{display:flex;gap:10px;margin-top:18px}
   .rowbtns button{flex:1}
 </style>
@@ -96,9 +98,9 @@
 <div class="card">
   <div class="hint"><b>How it works:</b>
     <ol class="hint">
-      <li>Point your phone camera at the computer screen and record a video while scrolling through the questions. Keep each question steady on screen ~1s. Hold as still as you can and avoid glare — the steadier the shot, the cleaner the read.</li>
+      <li>Point your phone camera at the computer screen and record a video while scrolling through the questions. Keep each question steady on screen ~1s. Angled or off-axis shots are fine — the vision model corrects for perspective.</li>
       <li>Stop recording, come back here, upload the video below.</li>
-      <li>Frames are scanned on-device, duplicates dropped, and their text is read locally with OCR — then only that text is sent to DeepSeek for answering. No images ever leave your device.</li>
+      <li>Frames are extracted on-device and duplicates dropped, then batched to <b>Google Gemini 2.0 Flash</b> which reads the questions and answers straight from the images. DeepSeek can optionally double-check the answers.</li>
     </ol>
   </div>
 </div>
@@ -123,21 +125,23 @@
 <div id="modal">
   <div class="sheet">
     <h2>API keys</h2>
-    <div class="hint">Stored only in this browser (localStorage). DeepSeek is primary; Anthropic is an optional automatic fallback if a batch fails.</div>
-    <label>DeepSeek API key</label>
+    <div class="hint">Stored only in this browser (localStorage). Google Gemini reads the frames (vision). DeepSeek is optional — when enabled it refines the answers as a second pass.</div>
+
+    <label>Google Gemini API key</label>
+    <input id="k_gem" placeholder="AIza..." autocomplete="off">
+    <label>Vision model</label>
+    <select id="k_gemmodel">
+      <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+    </select>
+
+    <label>DeepSeek API key (optional)</label>
     <input id="k_ds" placeholder="sk-..." autocomplete="off">
     <label>DeepSeek model</label>
     <input id="k_dsmodel" placeholder="deepseek-chat">
     <label>DeepSeek endpoint</label>
     <input id="k_dsurl" placeholder="https://api.deepseek.com/chat/completions">
-    <label>Anthropic API key (fallback, optional)</label>
-    <input id="k_ant" placeholder="sk-ant-..." autocomplete="off">
-    <label>Anthropic model</label>
-    <select id="k_model">
-      <option value="claude-fable-5">claude-fable-5 (most accurate)</option>
-      <option value="claude-sonnet-4-6">claude-sonnet-4-6 (faster/cheaper)</option>
-      <option value="claude-haiku-4-5-20251001">claude-haiku-4-5 (fastest)</option>
-    </select>
+    <div class="toggle"><input type="checkbox" id="k_refine"><label for="k_refine" style="margin:0">Refine answers with DeepSeek after extraction</label></div>
+
     <div class="rowbtns">
       <button class="ghost" id="closeModal">Cancel</button>
       <button class="primary" style="margin-top:0;width:auto" id="saveKeys">Save</button>
@@ -145,27 +149,33 @@
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script>
 /* ============ settings ============ */
 const S = {
+  get gem(){return localStorage.getItem('sk_gem')||''},
+  get gemmodel(){return localStorage.getItem('sk_gemmodel')||'gemini-2.0-flash'},
   get ds(){return localStorage.getItem('sk_ds')||''},
   get dsmodel(){return localStorage.getItem('sk_dsmodel')||'deepseek-chat'},
   get dsurl(){return localStorage.getItem('sk_dsurl')||'https://api.deepseek.com/chat/completions'},
-  get ant(){return localStorage.getItem('sk_ant')||''},
-  get model(){return localStorage.getItem('sk_model')||'claude-fable-5'},
+  get refine(){return localStorage.getItem('sk_refine')==='1'},
 };
 const $ = id=>document.getElementById(id);
 const modal=$('modal');
-function syncSettingsBtn(){ $('settingsBtn').classList.toggle('warn', !S.ds); }
-$('settingsBtn').onclick=()=>{ $('k_ds').value=S.ds; $('k_dsmodel').value=S.dsmodel; $('k_dsurl').value=S.dsurl; $('k_ant').value=S.ant; $('k_model').value=S.model; modal.classList.add('on'); };
+function syncSettingsBtn(){ $('settingsBtn').classList.toggle('warn', !S.gem); }
+$('settingsBtn').onclick=()=>{
+  $('k_gem').value=S.gem; $('k_gemmodel').value=S.gemmodel;
+  $('k_ds').value=S.ds; $('k_dsmodel').value=S.dsmodel; $('k_dsurl').value=S.dsurl;
+  $('k_refine').checked=S.refine;
+  modal.classList.add('on');
+};
 $('closeModal').onclick=()=>modal.classList.remove('on');
 $('saveKeys').onclick=()=>{
+  localStorage.setItem('sk_gem',$('k_gem').value.trim());
+  localStorage.setItem('sk_gemmodel',$('k_gemmodel').value);
   localStorage.setItem('sk_ds',$('k_ds').value.trim());
   localStorage.setItem('sk_dsmodel',$('k_dsmodel').value.trim()||'deepseek-chat');
   localStorage.setItem('sk_dsurl',$('k_dsurl').value.trim()||'https://api.deepseek.com/chat/completions');
-  localStorage.setItem('sk_ant',$('k_ant').value.trim());
-  localStorage.setItem('sk_model',$('k_model').value);
+  localStorage.setItem('sk_refine',$('k_refine').checked?'1':'0');
   modal.classList.remove('on'); syncSettingsBtn();
 };
 syncSettingsBtn();
@@ -223,7 +233,7 @@ async function extractFrames(file, onFrame){
       kept.push(jpg);
       onFrame(cv, kept.length);
     }
-    bar((i/total)*0.25);                          // extraction = first 25% of bar (OCR + answering follow)
+    bar((i/total)*0.30);                          // extraction = first 30% of bar (vision + refine follow)
     if(i%8===0) stats(`${Math.round(t)}s / ${Math.round(dur)}s · ${kept.length} frames kept`);
   }
   URL.revokeObjectURL(url);
@@ -231,66 +241,55 @@ async function extractFrames(file, onFrame){
 }
 
 /* ============ AI calls ============ */
-const SYSPROMPT = `You read OCR text captured from consecutive frames of a video of multiple-choice questions on a screen. The text is noisy: it may contain misread characters, broken line-wraps, stray UI text, and the same question repeated across adjacent frames. Extract EVERY distinct question, correcting obvious OCR errors. For each: the question text, its options, and the single correct answer. The same question appearing in multiple frames is ONE question — merge, never duplicate. Respond with ONLY a JSON array, no prose, no markdown fences:
+const VISION_PROMPT = `Extract all multiple-choice questions visible in these frames. The frames are consecutive shots of a screen, possibly at an angle or with perspective distortion — correct for that. The same question may appear across several frames; treat it as ONE question and never duplicate it. For each question give the question text, its options, and the single correct answer. "answer" must be one of the option keys. Return ONLY JSON, no prose, no markdown fences:
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A","confidence":0.97}]
-Options may be fewer or more than 4 — include what exists. "answer" must be one of the option keys. If a frame shows no question, contribute nothing for it. Be maximally accurate; think carefully before choosing each answer.`;
+Options may be fewer or more than 4 — include exactly what is shown. If a frame contains no question, contribute nothing for it.`;
 
-/* on-device OCR — free, runs entirely in the browser; no image ever leaves the device */
-async function ocrFrames(framesB64, onProg){
-  if(typeof Tesseract==='undefined') throw new Error('OCR library failed to load (check your connection).');
-  const worker=await Tesseract.createWorker('eng');
-  const texts=[];
-  for(let i=0;i<framesB64.length;i++){
-    try{ const {data:{text}}=await worker.recognize('data:image/jpeg;base64,'+framesB64[i]); texts.push((text||'').trim()); }
-    catch{ texts.push(''); }
-    onProg(i+1, framesB64.length);
-  }
-  await worker.terminate();
-  return texts;
-}
-
-async function askClaude(imagesB64){
-  const content = imagesB64.map(b=>({type:'image',source:{type:'base64',media_type:'image/jpeg',data:b}}));
-  content.push({type:'text',text:'Extract and answer all questions in these frames. JSON array only.'});
-  const r=await fetch('https://api.anthropic.com/v1/messages',{
+/* Google Gemini 2.0 Flash — reads the frames directly (vision) */
+async function askGemini(imagesB64){
+  if(!S.gem) throw new Error('no Gemini API key configured');
+  const parts=[{text:VISION_PROMPT}];
+  for(const b of imagesB64) parts.push({inline_data:{mime_type:'image/jpeg',data:b}});
+  const url=`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(S.gemmodel)}:generateContent?key=${encodeURIComponent(S.gem)}`;
+  const r=await fetch(url,{
     method:'POST',
-    headers:{'content-type':'application/json','x-api-key':S.ant,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-    body:JSON.stringify({model:S.model,max_tokens:4096,system:SYSPROMPT,messages:[{role:'user',content}]})
+    headers:{'content-type':'application/json'},
+    body:JSON.stringify({
+      contents:[{role:'user',parts}],
+      generationConfig:{temperature:0.1,maxOutputTokens:8192,responseMimeType:'application/json'}
+    })
   });
-  if(!r.ok) throw new Error('Anthropic '+r.status+': '+(await r.text()).slice(0,200));
+  if(!r.ok) throw new Error('Gemini '+r.status+': '+(await r.text()).slice(0,200));
   const d=await r.json();
-  return d.content.filter(c=>c.type==='text').map(c=>c.text).join('\n');
+  const cand=d.candidates&&d.candidates[0];
+  if(!cand||!cand.content||!cand.content.parts) return '[]';
+  return cand.content.parts.map(p=>p.text||'').join('\n');
 }
 
-async function askDeepSeek(texts){
+/* DeepSeek — optional second pass; re-checks/refines the answers from extracted text */
+async function refineWithDeepSeek(list){
   if(!S.ds) throw new Error('no DeepSeek key configured');
-  const joined = texts.map((t,i)=>`--- FRAME ${i+1} ---\n${t||'(no text)'}`).join('\n\n');
+  const payload=JSON.stringify(list.map(q=>({question:q.question,options:q.options})));
   const r=await fetch(S.dsurl,{
     method:'POST',
     headers:{'content-type':'application/json','authorization':'Bearer '+S.ds},
     body:JSON.stringify({model:S.dsmodel,messages:[
-      {role:'system',content:SYSPROMPT},
-      {role:'user',content:'OCR text from consecutive video frames follows. Extract and answer every distinct multiple-choice question. JSON array only.\n\n'+joined}
-    ],max_tokens:4096})
+      {role:'system',content:'You are given multiple-choice questions with their options as a JSON array. For each, determine the single correct answer key. Respond with ONLY a JSON array in the SAME order and length as the input, each item: {"answer":"A","confidence":0.0-1.0}. No prose, no markdown fences.'},
+      {role:'user',content:payload}
+    ],max_tokens:4096,temperature:0})
   });
   if(!r.ok) throw new Error('DeepSeek '+r.status+': '+(await r.text()).slice(0,200));
   const d=await r.json();
-  return d.choices[0].message.content;
+  return parseJSON(d.choices[0].message.content);
 }
 
 function parseJSON(text){
-  const m=text.match(/\[[\s\S]*\]/); if(!m) return [];
+  const m=String(text||'').match(/\[[\s\S]*\]/); if(!m) return [];
   try{ return JSON.parse(m[0]); }catch{ return []; }
 }
 
-async function answerBatch(imgs, txts){
-  try{ return parseJSON(await askDeepSeek(txts)); }
-  catch(e1){
-    if(!S.ant) throw e1;               // no fallback configured → DeepSeek only
-    console.warn('DeepSeek failed, trying Anthropic:',e1.message);
-    try{ return parseJSON(await askClaude(imgs)); }   // Anthropic can read the frames directly
-    catch(e2){ console.warn('Fallback failed:',e2.message); throw e1; }
-  }
+async function visionBatch(imgs){
+  return parseJSON(await askGemini(imgs));
 }
 
 /* concurrency pool */
@@ -313,7 +312,7 @@ const BATCH=8, PARALLEL=4;
 
 $('go').onclick=async()=>{
   if(!videoFile) return;
-  if(!S.ds){ modal.classList.add('on'); return; }
+  if(!S.gem){ modal.classList.add('on'); return; }
   $('go').disabled=true; $('err').classList.remove('on');
   $('results').innerHTML=''; $('summary').classList.remove('on');
   const strip=$('strip'); strip.innerHTML=''; strip.classList.add('on');
@@ -330,17 +329,12 @@ $('go').onclick=async()=>{
   }catch(e){ return fail(e.message); }
   if(!frames.length) return fail('No readable frames found in that video.');
 
-  /* on-device OCR (free) → turns each frame into text for DeepSeek */
-  phase('reading text on-device…');
-  let texts;
-  try{ texts=await ocrFrames(frames,(d,t)=>{ bar(0.25+0.35*d/t); stats(`OCR ${d}/${t} frames`); }); }
-  catch(e){ return fail(e.message); }
-
-  phase('answering…'); stats(frames.length+' frames → '+Math.ceil(frames.length/BATCH)+' batches');
+  /* batch frames → Gemini vision (8 per batch, 4 parallel) */
+  phase('reading with Gemini…'); stats(frames.length+' frames → '+Math.ceil(frames.length/BATCH)+' batches');
   const batches=[];
-  for(let i=0;i<frames.length;i+=BATCH) batches.push([frames.slice(i,i+BATCH), texts.slice(i,i+BATCH)]);
-  const tasks=batches.map(([imgs,txts])=>()=>answerBatch(imgs,txts));
-  const {out,firstErr}=await pool(tasks,PARALLEL,(d,t)=>{ bar(0.6+0.4*d/t); stats(`batch ${d}/${t}`); });
+  for(let i=0;i<frames.length;i+=BATCH) batches.push(frames.slice(i,i+BATCH));
+  const tasks=batches.map(imgs=>()=>visionBatch(imgs));
+  const {out,firstErr}=await pool(tasks,PARALLEL,(d,t)=>{ bar(0.3+0.55*d/t); stats(`batch ${d}/${t}`); });
 
   /* merge + dedupe questions across batches */
   const seen=new Map();
@@ -351,10 +345,28 @@ $('go').onclick=async()=>{
     const prev=seen.get(key);
     if(!prev || (q.confidence||0)>(prev.confidence||0)) seen.set(key,q);
   }
-  const list=[...seen.values()];
+  let list=[...seen.values()];
 
   if(!list.length){
     return fail(firstErr ? 'All batches failed. '+firstErr.message : 'No questions detected in the recording.');
+  }
+
+  /* optional DeepSeek refinement pass */
+  let refineNote='';
+  if(S.refine && S.ds){
+    phase('refining with DeepSeek…'); bar(0.9);
+    try{
+      const refined=await refineWithDeepSeek(list);
+      if(refined.length===list.length){
+        list=list.map((q,i)=>{
+          const rr=refined[i];
+          if(rr && rr.answer && q.options && q.options[rr.answer]!==undefined){
+            return {...q, answer:rr.answer, confidence:(typeof rr.confidence==='number'?rr.confidence:q.confidence)};
+          }
+          return q;
+        });
+      } else refineNote='DeepSeek returned a mismatched result — kept Gemini answers.';
+    }catch(e){ refineNote='DeepSeek refine failed ('+e.message+') — kept Gemini answers.'; }
   }
 
   /* render */
@@ -367,11 +379,12 @@ $('go').onclick=async()=>{
     div.className='q'+((q.confidence||1)<0.7?' conf-low':'');
     const opts=Object.entries(q.options||{}).map(([k,v])=>
       `<div class="opt${k===q.answer?' sel':''}"><span class="key">${k}</span><span>${esc(v)}</span></div>`).join('');
-    div.innerHTML=`<div class="qh"><span>QUESTION ${i+1}</span><span class="badge">${q.answer}${(q.confidence||1)<0.7?' · low confidence':''}</span></div>
+    div.innerHTML=`<div class="qh"><span>QUESTION ${i+1}</span><span class="badge">${esc(q.answer)}${(q.confidence||1)<0.7?' · low confidence':''}</span></div>
       <div class="qt">${esc(q.question)}</div>${opts}`;
     R.appendChild(div);
   });
-  if(firstErr){ const e=$('err'); e.textContent='Note: some batches failed ('+firstErr.message+') — results may be partial.'; e.classList.add('on'); }
+  const notes=[refineNote, firstErr?('Some batches failed ('+firstErr.message+') — results may be partial.'):''].filter(Boolean);
+  if(notes.length){ const e=$('err'); e.textContent='Note: '+notes.join(' '); e.classList.add('on'); }
   $('go').disabled=false;
 };
 function esc(s){ return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
