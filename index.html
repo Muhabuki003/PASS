@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>ScanKey — video → answered questions</title>
+<style>
+  :root{
+    --ink:#0b0f14;         /* deep ink */
+    --panel:#121821;
+    --panel2:#0f141c;
+    --line:#1f2937;
+    --text:#dbe4ee;
+    --dim:#7c8899;
+    --mint:#3ef0b0;        /* phosphor scan accent */
+    --mint-dim:#194d3c;
+    --amber:#ffb454;
+    --red:#ff6b6b;
+    --mono:'SF Mono',ui-monospace,Menlo,Consolas,monospace;
+    --sans:-apple-system,'Inter',system-ui,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  html,body{background:var(--ink);color:var(--text);font-family:var(--sans);min-height:100%}
+  body{padding:max(16px,env(safe-area-inset-top)) 16px calc(24px + env(safe-area-inset-bottom));max-width:760px;margin:0 auto}
+
+  header{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:18px}
+  .logo{font-family:var(--mono);font-size:20px;letter-spacing:.06em;color:var(--mint)}
+  .logo b{color:var(--text);font-weight:600}
+  #settingsBtn{background:none;border:1px solid var(--line);color:var(--dim);font-family:var(--mono);font-size:12px;padding:7px 12px;border-radius:8px;cursor:pointer}
+  #settingsBtn.warn{border-color:var(--amber);color:var(--amber)}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:14px}
+  .hint{color:var(--dim);font-size:13px;line-height:1.55}
+  .hint b{color:var(--text);font-weight:600}
+  ol.hint{padding-left:18px;margin-top:8px}
+  ol.hint li{margin-bottom:4px}
+
+  #drop{border:1.5px dashed var(--mint-dim);border-radius:14px;padding:34px 18px;text-align:center;cursor:pointer;transition:border-color .15s;background:var(--panel2)}
+  #drop.active,#drop:hover{border-color:var(--mint)}
+  #drop .big{font-size:17px;font-weight:600;margin-bottom:6px}
+  #drop .sub{color:var(--dim);font-size:13px}
+  input[type=file]{display:none}
+
+  /* scan strip — deduped frames appear here live */
+  #strip{display:none;gap:6px;overflow-x:auto;padding:10px 0 4px;-webkit-overflow-scrolling:touch}
+  #strip.on{display:flex}
+  #strip canvas{height:64px;border-radius:6px;border:1px solid var(--line);flex:0 0 auto;opacity:0;animation:pop .25s forwards}
+  @keyframes pop{to{opacity:1}}
+
+  .statusrow{display:flex;justify-content:space-between;align-items:center;font-family:var(--mono);font-size:12.5px;color:var(--dim);margin-top:10px}
+  .statusrow .val{color:var(--mint)}
+  #bar{height:4px;background:var(--line);border-radius:2px;margin-top:10px;overflow:hidden}
+  #barFill{height:100%;width:0%;background:var(--mint);transition:width .3s}
+
+  button.primary{width:100%;margin-top:14px;background:var(--mint);color:#04140d;border:none;border-radius:10px;padding:14px;font-size:16px;font-weight:700;cursor:pointer}
+  button.primary:disabled{background:var(--mint-dim);color:var(--dim);cursor:default}
+  button.ghost{background:none;border:1px solid var(--line);color:var(--text);border-radius:10px;padding:11px 14px;font-size:14px;cursor:pointer}
+
+  /* results */
+  .q{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:10px}
+  .q .qh{font-family:var(--mono);font-size:12px;color:var(--dim);margin-bottom:6px;display:flex;justify-content:space-between}
+  .q .qt{font-size:14.5px;line-height:1.45;margin-bottom:10px}
+  .opt{display:flex;gap:10px;align-items:flex-start;padding:7px 10px;border-radius:8px;font-size:14px;line-height:1.4;color:var(--dim)}
+  .opt .key{font-family:var(--mono);flex:0 0 18px}
+  .opt.sel{background:rgba(62,240,176,.09);color:var(--text);border:1px solid var(--mint-dim)}
+  .opt.sel .key{color:var(--mint);font-weight:700}
+  .conf-low .qh .badge{color:var(--amber)}
+  .badge{font-family:var(--mono)}
+  #summary{display:none;font-family:var(--mono);font-size:13px;color:var(--dim);margin:16px 0 12px;display:none;justify-content:space-between;align-items:center}
+  #summary.on{display:flex}
+  #err{display:none;border:1px solid var(--red);color:var(--red);border-radius:10px;padding:12px;font-size:13px;margin-top:12px;line-height:1.5}
+  #err.on{display:block}
+
+  /* settings modal */
+  #modal{display:none;position:fixed;inset:0;background:rgba(4,8,12,.82);z-index:50;padding:20px;overflow-y:auto}
+  #modal.on{display:block}
+  .sheet{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:20px;max-width:520px;margin:8vh auto 0}
+  .sheet h2{font-size:16px;margin-bottom:4px}
+  .sheet .hint{margin-bottom:14px}
+  label{display:block;font-family:var(--mono);font-size:11.5px;color:var(--dim);margin:14px 0 5px;letter-spacing:.05em;text-transform:uppercase}
+  .sheet input,.sheet select{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:9px;color:var(--text);padding:11px 12px;font-size:15px;font-family:var(--mono)}
+  .sheet input:focus,.sheet select:focus{outline:none;border-color:var(--mint)}
+  .rowbtns{display:flex;gap:10px;margin-top:18px}
+  .rowbtns button{flex:1}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">scan<b>key</b></div>
+  <button id="settingsBtn">⚙︎ API keys</button>
+</header>
+
+<div class="card">
+  <div class="hint"><b>How it works on iPhone:</b>
+    <ol class="hint">
+      <li>Record your screen with the iOS recorder (Control Center → ⏺) while scrolling the questions. Keep each question on screen ~1s.</li>
+      <li>Stop recording, come back here, upload the video below.</li>
+      <li>Frames are scanned on-device, duplicates dropped, then answered in parallel batches. Nothing is uploaded except question frames to the AI API.</li>
+    </ol>
+  </div>
+</div>
+
+<div class="card">
+  <div id="drop">
+    <div class="big">Upload screen recording</div>
+    <div class="sub">MP4 / MOV · up to ~5 min · tap to choose</div>
+  </div>
+  <input type="file" id="file" accept="video/*">
+  <div id="strip"></div>
+  <div class="statusrow"><span id="phase">idle</span><span class="val" id="stats"></span></div>
+  <div id="bar"><div id="barFill"></div></div>
+  <button class="primary" id="go" disabled>Analyze</button>
+  <div id="err"></div>
+</div>
+
+<div id="summary"><span id="sumText"></span><button class="ghost" id="copyBtn">Copy answers</button></div>
+<div id="results"></div>
+
+<!-- settings -->
+<div id="modal">
+  <div class="sheet">
+    <h2>API keys</h2>
+    <div class="hint">Stored only in this browser (localStorage). Anthropic is primary; DeepSeek is the automatic fallback if a batch fails.</div>
+    <label>Anthropic API key</label>
+    <input id="k_ant" placeholder="sk-ant-..." autocomplete="off">
+    <label>Anthropic model</label>
+    <select id="k_model">
+      <option value="claude-fable-5">claude-fable-5 (most accurate)</option>
+      <option value="claude-sonnet-4-6">claude-sonnet-4-6 (faster/cheaper)</option>
+      <option value="claude-haiku-4-5-20251001">claude-haiku-4-5 (fastest)</option>
+    </select>
+    <label>DeepSeek API key (fallback, optional)</label>
+    <input id="k_ds" placeholder="sk-..." autocomplete="off">
+    <label>DeepSeek endpoint</label>
+    <input id="k_dsurl" placeholder="https://api.deepseek.com/chat/completions">
+    <div class="rowbtns">
+      <button class="ghost" id="closeModal">Cancel</button>
+      <button class="primary" style="margin-top:0;width:auto" id="saveKeys">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ============ settings ============ */
+const S = {
+  get ant(){return localStorage.getItem('sk_ant')||''},
+  get model(){return localStorage.getItem('sk_model')||'claude-fable-5'},
+  get ds(){return localStorage.getItem('sk_ds')||''},
+  get dsurl(){return localStorage.getItem('sk_dsurl')||'https://api.deepseek.com/chat/completions'},
+};
+const $ = id=>document.getElementById(id);
+const modal=$('modal');
+function syncSettingsBtn(){ $('settingsBtn').classList.toggle('warn', !S.ant); }
+$('settingsBtn').onclick=()=>{ $('k_ant').value=S.ant; $('k_model').value=S.model; $('k_ds').value=S.ds; $('k_dsurl').value=S.dsurl; modal.classList.add('on'); };
+$('closeModal').onclick=()=>modal.classList.remove('on');
+$('saveKeys').onclick=()=>{
+  localStorage.setItem('sk_ant',$('k_ant').value.trim());
+  localStorage.setItem('sk_model',$('k_model').value);
+  localStorage.setItem('sk_ds',$('k_ds').value.trim());
+  localStorage.setItem('sk_dsurl',$('k_dsurl').value.trim()||'https://api.deepseek.com/chat/completions');
+  modal.classList.remove('on'); syncSettingsBtn();
+};
+syncSettingsBtn();
+
+/* ============ upload ============ */
+let videoFile=null;
+$('drop').onclick=()=>$('file').click();
+$('file').onchange=e=>{ if(e.target.files[0]){ videoFile=e.target.files[0]; $('drop').querySelector('.big').textContent=videoFile.name; $('drop').querySelector('.sub').textContent=(videoFile.size/1048576).toFixed(1)+' MB — ready'; $('go').disabled=false; }};
+['dragover','dragleave','drop'].forEach(ev=>$('drop').addEventListener(ev,e=>{e.preventDefault(); $('drop').classList.toggle('active',ev==='dragover'); if(ev==='drop'&&e.dataTransfer.files[0]){$('file').files=e.dataTransfer.files;$('file').onchange({target:$('file')});}}));
+
+const phase=t=>$('phase').textContent=t;
+const stats=t=>$('stats').textContent=t;
+const bar=p=>$('barFill').style.width=(p*100).toFixed(1)+'%';
+function fail(msg){ const e=$('err'); e.textContent=msg; e.classList.add('on'); phase('error'); $('go').disabled=false; }
+
+/* ============ frame extraction + perceptual dedup ============ */
+// Fingerprint: 24x24 grayscale. Keep a frame only if it differs enough from the LAST KEPT frame.
+function fingerprint(ctx24, canvas){
+  ctx24.drawImage(canvas,0,0,24,24);
+  const d=ctx24.getImageData(0,0,24,24).data, fp=new Float32Array(576);
+  for(let i=0;i<576;i++){ const j=i*4; fp[i]=(d[j]*.3+d[j+1]*.59+d[j+2]*.11); }
+  return fp;
+}
+function diff(a,b){ if(!a) return 1e9; let s=0; for(let i=0;i<576;i++) s+=Math.abs(a[i]-b[i]); return s/576; }
+
+async function extractFrames(file, onFrame){
+  const url=URL.createObjectURL(file);
+  const v=document.createElement('video');
+  v.src=url; v.muted=true; v.playsInline=true; v.preload='auto';
+  await new Promise((res,rej)=>{ v.onloadedmetadata=res; v.onerror=()=>rej(new Error('Could not read this video. Try re-exporting or a shorter clip.')); });
+  const dur=Math.min(v.duration, 330); // hard cap ~5.5 min
+  const FPS=2;                          // 2 samples/sec catches ~1s-per-question scrolling
+  const targetW=Math.min(1000, v.videoWidth); // enough for legible text, small payload
+  const scale=targetW/v.videoWidth;
+  const cv=document.createElement('canvas'); cv.width=targetW; cv.height=Math.round(v.videoHeight*scale);
+  const ctx=cv.getContext('2d',{willReadFrequently:true});
+  const c24=document.createElement('canvas'); c24.width=24;c24.height=24;
+  const ctx24=c24.getContext('2d',{willReadFrequently:true});
+
+  const kept=[]; let lastFP=null;
+  const step=1/FPS, total=Math.floor(dur/step);
+  for(let i=0;i<=total;i++){
+    const t=Math.min(i*step, dur-0.05);
+    await new Promise((res,rej)=>{ v.onseeked=res; v.onerror=()=>rej(new Error('Seek failed mid-video.')); v.currentTime=t; });
+    ctx.drawImage(v,0,0,cv.width,cv.height);
+    const fp=fingerprint(ctx24,cv);
+    if(diff(lastFP,fp)>9){                       // scene changed → keep
+      lastFP=fp;
+      const jpg=cv.toDataURL('image/jpeg',0.72).split(',')[1];
+      kept.push(jpg);
+      onFrame(cv, kept.length);
+    }
+    bar((i/total)*0.35);                          // extraction = first 35% of bar
+    if(i%8===0) stats(`${Math.round(t)}s / ${Math.round(dur)}s · ${kept.length} frames kept`);
+  }
+  URL.revokeObjectURL(url);
+  return kept;
+}
+
+/* ============ AI calls ============ */
+const SYSPROMPT = `You read screenshots of multiple-choice questions. Extract EVERY distinct question visible across the images. For each: the question text, its options, and the single correct answer. Some questions may appear partially in two adjacent frames — merge them, never duplicate. Respond with ONLY a JSON array, no prose, no markdown fences:
+[{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A","confidence":0.97}]
+Options may be fewer or more than 4 — include what exists. "answer" must be one of the option keys. If a frame shows no question, contribute nothing for it. Be maximally accurate; think carefully before choosing each answer.`;
+
+async function askClaude(imagesB64){
+  const content = imagesB64.map(b=>({type:'image',source:{type:'base64',media_type:'image/jpeg',data:b}}));
+  content.push({type:'text',text:'Extract and answer all questions in these frames. JSON array only.'});
+  const r=await fetch('https://api.anthropic.com/v1/messages',{
+    method:'POST',
+    headers:{'content-type':'application/json','x-api-key':S.ant,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+    body:JSON.stringify({model:S.model,max_tokens:4096,system:SYSPROMPT,messages:[{role:'user',content}]})
+  });
+  if(!r.ok) throw new Error('Anthropic '+r.status+': '+(await r.text()).slice(0,200));
+  const d=await r.json();
+  return d.content.filter(c=>c.type==='text').map(c=>c.text).join('\n');
+}
+
+async function askDeepSeek(imagesB64){
+  if(!S.ds) throw new Error('no DeepSeek key configured');
+  const content = imagesB64.map(b=>({type:'image_url',image_url:{url:'data:image/jpeg;base64,'+b}}));
+  content.push({type:'text',text:'Extract and answer all questions in these frames. JSON array only.'});
+  const r=await fetch(S.dsurl,{
+    method:'POST',
+    headers:{'content-type':'application/json','authorization':'Bearer '+S.ds},
+    body:JSON.stringify({model:'deepseek-chat',messages:[{role:'system',content:SYSPROMPT},{role:'user',content}],max_tokens:4096})
+  });
+  if(!r.ok) throw new Error('DeepSeek '+r.status);
+  const d=await r.json();
+  return d.choices[0].message.content;
+}
+
+function parseJSON(text){
+  const m=text.match(/\[[\s\S]*\]/); if(!m) return [];
+  try{ return JSON.parse(m[0]); }catch{ return []; }
+}
+
+async function answerBatch(imgs){
+  try{ return parseJSON(await askClaude(imgs)); }
+  catch(e1){
+    console.warn('Claude failed, trying DeepSeek:',e1.message);
+    try{ return parseJSON(await askDeepSeek(imgs)); }
+    catch(e2){ console.warn('Fallback failed:',e2.message); throw e1; }
+  }
+}
+
+/* concurrency pool */
+async function pool(tasks, limit, onDone){
+  const out=[]; let idx=0, done=0, firstErr=null;
+  async function worker(){
+    while(idx<tasks.length){
+      const my=idx++;
+      try{ out[my]=await tasks[my](); }
+      catch(e){ out[my]=[]; firstErr=firstErr||e; }
+      onDone(++done, tasks.length);
+    }
+  }
+  await Promise.all(Array.from({length:Math.min(limit,tasks.length)},worker));
+  return {out, firstErr};
+}
+
+/* ============ orchestration ============ */
+const BATCH=8, PARALLEL=4;
+
+$('go').onclick=async()=>{
+  if(!videoFile) return;
+  if(!S.ant){ modal.classList.add('on'); return; }
+  $('go').disabled=true; $('err').classList.remove('on');
+  $('results').innerHTML=''; $('summary').classList.remove('on');
+  const strip=$('strip'); strip.innerHTML=''; strip.classList.add('on');
+
+  let frames;
+  phase('scanning video…');
+  try{
+    frames=await extractFrames(videoFile,(cv,n)=>{
+      const t=document.createElement('canvas');
+      t.width=96; t.height=Math.round(96*cv.height/cv.width);
+      t.getContext('2d').drawImage(cv,0,0,t.width,t.height);
+      strip.appendChild(t); strip.scrollLeft=strip.scrollWidth;
+    });
+  }catch(e){ return fail(e.message); }
+  if(!frames.length) return fail('No readable frames found in that video.');
+
+  phase('answering…'); stats(frames.length+' frames → '+Math.ceil(frames.length/BATCH)+' batches');
+  const batches=[];
+  for(let i=0;i<frames.length;i+=BATCH) batches.push(frames.slice(i,i+BATCH));
+  const tasks=batches.map(b=>()=>answerBatch(b));
+  const {out,firstErr}=await pool(tasks,PARALLEL,(d,t)=>{ bar(0.35+0.65*d/t); stats(`batch ${d}/${t}`); });
+
+  /* merge + dedupe questions across batches */
+  const seen=new Map();
+  for(const arr of out) for(const q of arr){
+    if(!q||!q.question||!q.answer) continue;
+    const key=q.question.toLowerCase().replace(/[^a-z0-9]/g,'').slice(0,80);
+    if(!key) continue;
+    const prev=seen.get(key);
+    if(!prev || (q.confidence||0)>(prev.confidence||0)) seen.set(key,q);
+  }
+  const list=[...seen.values()];
+
+  if(!list.length){
+    return fail(firstErr ? 'All batches failed. '+firstErr.message : 'No questions detected in the recording.');
+  }
+
+  /* render */
+  phase('done'); bar(1); stats(list.length+' questions answered');
+  $('sumText').textContent=list.length+' questions · answers: '+list.map((q,i)=>(i+1)+':'+q.answer).join(' ');
+  $('summary').classList.add('on');
+  const R=$('results');
+  list.forEach((q,i)=>{
+    const div=document.createElement('div');
+    div.className='q'+((q.confidence||1)<0.7?' conf-low':'');
+    const opts=Object.entries(q.options||{}).map(([k,v])=>
+      `<div class="opt${k===q.answer?' sel':''}"><span class="key">${k}</span><span>${esc(v)}</span></div>`).join('');
+    div.innerHTML=`<div class="qh"><span>QUESTION ${i+1}</span><span class="badge">${q.answer}${(q.confidence||1)<0.7?' · low confidence':''}</span></div>
+      <div class="qt">${esc(q.question)}</div>${opts}`;
+    R.appendChild(div);
+  });
+  if(firstErr){ const e=$('err'); e.textContent='Note: some batches failed ('+firstErr.message+') — results may be partial.'; e.classList.add('on'); }
+  $('go').disabled=false;
+};
+function esc(s){ return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+$('copyBtn').onclick=()=>{
+  const txt=[...document.querySelectorAll('.q')].map((q,i)=>{
+    const ans=q.querySelector('.badge').textContent.split(' ')[0];
+    return (i+1)+'. '+ans;
+  }).join('\n');
+  navigator.clipboard.writeText(txt);
+  $('copyBtn').textContent='Copied ✓'; setTimeout(()=>$('copyBtn').textContent='Copy answers',1500);
+};
+</script>
+</body>
+</html>
