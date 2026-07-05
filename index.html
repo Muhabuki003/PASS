@@ -98,7 +98,7 @@
     <ol class="hint">
       <li>Point your phone camera at the computer screen and record a video while scrolling through the questions. Keep each question steady on screen ~1s. Hold as still as you can and avoid glare — the steadier the shot, the cleaner the read.</li>
       <li>Stop recording, come back here, upload the video below.</li>
-      <li>Frames are scanned on-device, duplicates dropped, then answered in parallel batches. Nothing is uploaded except question frames to the AI API.</li>
+      <li>Frames are scanned on-device, duplicates dropped, and their text is read locally with OCR — then only that text is sent to DeepSeek for answering. No images ever leave your device.</li>
     </ol>
   </div>
 </div>
@@ -145,6 +145,7 @@
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script>
 /* ============ settings ============ */
 const S = {
@@ -222,7 +223,7 @@ async function extractFrames(file, onFrame){
       kept.push(jpg);
       onFrame(cv, kept.length);
     }
-    bar((i/total)*0.35);                          // extraction = first 35% of bar
+    bar((i/total)*0.25);                          // extraction = first 25% of bar (OCR + answering follow)
     if(i%8===0) stats(`${Math.round(t)}s / ${Math.round(dur)}s · ${kept.length} frames kept`);
   }
   URL.revokeObjectURL(url);
@@ -230,9 +231,23 @@ async function extractFrames(file, onFrame){
 }
 
 /* ============ AI calls ============ */
-const SYSPROMPT = `You read screenshots of multiple-choice questions. Extract EVERY distinct question visible across the images. For each: the question text, its options, and the single correct answer. Some questions may appear partially in two adjacent frames — merge them, never duplicate. Respond with ONLY a JSON array, no prose, no markdown fences:
+const SYSPROMPT = `You read OCR text captured from consecutive frames of a video of multiple-choice questions on a screen. The text is noisy: it may contain misread characters, broken line-wraps, stray UI text, and the same question repeated across adjacent frames. Extract EVERY distinct question, correcting obvious OCR errors. For each: the question text, its options, and the single correct answer. The same question appearing in multiple frames is ONE question — merge, never duplicate. Respond with ONLY a JSON array, no prose, no markdown fences:
 [{"question":"...","options":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A","confidence":0.97}]
 Options may be fewer or more than 4 — include what exists. "answer" must be one of the option keys. If a frame shows no question, contribute nothing for it. Be maximally accurate; think carefully before choosing each answer.`;
+
+/* on-device OCR — free, runs entirely in the browser; no image ever leaves the device */
+async function ocrFrames(framesB64, onProg){
+  if(typeof Tesseract==='undefined') throw new Error('OCR library failed to load (check your connection).');
+  const worker=await Tesseract.createWorker('eng');
+  const texts=[];
+  for(let i=0;i<framesB64.length;i++){
+    try{ const {data:{text}}=await worker.recognize('data:image/jpeg;base64,'+framesB64[i]); texts.push((text||'').trim()); }
+    catch{ texts.push(''); }
+    onProg(i+1, framesB64.length);
+  }
+  await worker.terminate();
+  return texts;
+}
 
 async function askClaude(imagesB64){
   const content = imagesB64.map(b=>({type:'image',source:{type:'base64',media_type:'image/jpeg',data:b}}));
@@ -247,14 +262,16 @@ async function askClaude(imagesB64){
   return d.content.filter(c=>c.type==='text').map(c=>c.text).join('\n');
 }
 
-async function askDeepSeek(imagesB64){
+async function askDeepSeek(texts){
   if(!S.ds) throw new Error('no DeepSeek key configured');
-  const content = imagesB64.map(b=>({type:'image_url',image_url:{url:'data:image/jpeg;base64,'+b}}));
-  content.push({type:'text',text:'Extract and answer all questions in these frames. JSON array only.'});
+  const joined = texts.map((t,i)=>`--- FRAME ${i+1} ---\n${t||'(no text)'}`).join('\n\n');
   const r=await fetch(S.dsurl,{
     method:'POST',
     headers:{'content-type':'application/json','authorization':'Bearer '+S.ds},
-    body:JSON.stringify({model:S.dsmodel,messages:[{role:'system',content:SYSPROMPT},{role:'user',content}],max_tokens:4096})
+    body:JSON.stringify({model:S.dsmodel,messages:[
+      {role:'system',content:SYSPROMPT},
+      {role:'user',content:'OCR text from consecutive video frames follows. Extract and answer every distinct multiple-choice question. JSON array only.\n\n'+joined}
+    ],max_tokens:4096})
   });
   if(!r.ok) throw new Error('DeepSeek '+r.status+': '+(await r.text()).slice(0,200));
   const d=await r.json();
@@ -266,12 +283,12 @@ function parseJSON(text){
   try{ return JSON.parse(m[0]); }catch{ return []; }
 }
 
-async function answerBatch(imgs){
-  try{ return parseJSON(await askDeepSeek(imgs)); }
+async function answerBatch(imgs, txts){
+  try{ return parseJSON(await askDeepSeek(txts)); }
   catch(e1){
-    if(!S.ant) throw e1;               // no fallback configured
+    if(!S.ant) throw e1;               // no fallback configured → DeepSeek only
     console.warn('DeepSeek failed, trying Anthropic:',e1.message);
-    try{ return parseJSON(await askClaude(imgs)); }
+    try{ return parseJSON(await askClaude(imgs)); }   // Anthropic can read the frames directly
     catch(e2){ console.warn('Fallback failed:',e2.message); throw e1; }
   }
 }
@@ -313,11 +330,17 @@ $('go').onclick=async()=>{
   }catch(e){ return fail(e.message); }
   if(!frames.length) return fail('No readable frames found in that video.');
 
+  /* on-device OCR (free) → turns each frame into text for DeepSeek */
+  phase('reading text on-device…');
+  let texts;
+  try{ texts=await ocrFrames(frames,(d,t)=>{ bar(0.25+0.35*d/t); stats(`OCR ${d}/${t} frames`); }); }
+  catch(e){ return fail(e.message); }
+
   phase('answering…'); stats(frames.length+' frames → '+Math.ceil(frames.length/BATCH)+' batches');
   const batches=[];
-  for(let i=0;i<frames.length;i+=BATCH) batches.push(frames.slice(i,i+BATCH));
-  const tasks=batches.map(b=>()=>answerBatch(b));
-  const {out,firstErr}=await pool(tasks,PARALLEL,(d,t)=>{ bar(0.35+0.65*d/t); stats(`batch ${d}/${t}`); });
+  for(let i=0;i<frames.length;i+=BATCH) batches.push([frames.slice(i,i+BATCH), texts.slice(i,i+BATCH)]);
+  const tasks=batches.map(([imgs,txts])=>()=>answerBatch(imgs,txts));
+  const {out,firstErr}=await pool(tasks,PARALLEL,(d,t)=>{ bar(0.6+0.4*d/t); stats(`batch ${d}/${t}`); });
 
   /* merge + dedupe questions across batches */
   const seen=new Map();
