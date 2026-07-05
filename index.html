@@ -94,9 +94,9 @@
 </header>
 
 <div class="card">
-  <div class="hint"><b>How it works on iPhone:</b>
+  <div class="hint"><b>How it works:</b>
     <ol class="hint">
-      <li>Record your screen with the iOS recorder (Control Center → ⏺) while scrolling the questions. Keep each question on screen ~1s.</li>
+      <li>Point your phone camera at the computer screen and record a video while scrolling through the questions. Keep each question steady on screen ~1s. Hold as still as you can and avoid glare — the steadier the shot, the cleaner the read.</li>
       <li>Stop recording, come back here, upload the video below.</li>
       <li>Frames are scanned on-device, duplicates dropped, then answered in parallel batches. Nothing is uploaded except question frames to the AI API.</li>
     </ol>
@@ -105,7 +105,7 @@
 
 <div class="card">
   <div id="drop">
-    <div class="big">Upload screen recording</div>
+    <div class="big">Upload phone recording</div>
     <div class="sub">MP4 / MOV · up to ~5 min · tap to choose</div>
   </div>
   <input type="file" id="file" accept="video/*">
@@ -123,8 +123,14 @@
 <div id="modal">
   <div class="sheet">
     <h2>API keys</h2>
-    <div class="hint">Stored only in this browser (localStorage). Anthropic is primary; DeepSeek is the automatic fallback if a batch fails.</div>
-    <label>Anthropic API key</label>
+    <div class="hint">Stored only in this browser (localStorage). DeepSeek is primary; Anthropic is an optional automatic fallback if a batch fails.</div>
+    <label>DeepSeek API key</label>
+    <input id="k_ds" placeholder="sk-..." autocomplete="off">
+    <label>DeepSeek model</label>
+    <input id="k_dsmodel" placeholder="deepseek-chat">
+    <label>DeepSeek endpoint</label>
+    <input id="k_dsurl" placeholder="https://api.deepseek.com/chat/completions">
+    <label>Anthropic API key (fallback, optional)</label>
     <input id="k_ant" placeholder="sk-ant-..." autocomplete="off">
     <label>Anthropic model</label>
     <select id="k_model">
@@ -132,10 +138,6 @@
       <option value="claude-sonnet-4-6">claude-sonnet-4-6 (faster/cheaper)</option>
       <option value="claude-haiku-4-5-20251001">claude-haiku-4-5 (fastest)</option>
     </select>
-    <label>DeepSeek API key (fallback, optional)</label>
-    <input id="k_ds" placeholder="sk-..." autocomplete="off">
-    <label>DeepSeek endpoint</label>
-    <input id="k_dsurl" placeholder="https://api.deepseek.com/chat/completions">
     <div class="rowbtns">
       <button class="ghost" id="closeModal">Cancel</button>
       <button class="primary" style="margin-top:0;width:auto" id="saveKeys">Save</button>
@@ -146,21 +148,23 @@
 <script>
 /* ============ settings ============ */
 const S = {
+  get ds(){return localStorage.getItem('sk_ds')||''},
+  get dsmodel(){return localStorage.getItem('sk_dsmodel')||'deepseek-chat'},
+  get dsurl(){return localStorage.getItem('sk_dsurl')||'https://api.deepseek.com/chat/completions'},
   get ant(){return localStorage.getItem('sk_ant')||''},
   get model(){return localStorage.getItem('sk_model')||'claude-fable-5'},
-  get ds(){return localStorage.getItem('sk_ds')||''},
-  get dsurl(){return localStorage.getItem('sk_dsurl')||'https://api.deepseek.com/chat/completions'},
 };
 const $ = id=>document.getElementById(id);
 const modal=$('modal');
-function syncSettingsBtn(){ $('settingsBtn').classList.toggle('warn', !S.ant); }
-$('settingsBtn').onclick=()=>{ $('k_ant').value=S.ant; $('k_model').value=S.model; $('k_ds').value=S.ds; $('k_dsurl').value=S.dsurl; modal.classList.add('on'); };
+function syncSettingsBtn(){ $('settingsBtn').classList.toggle('warn', !S.ds); }
+$('settingsBtn').onclick=()=>{ $('k_ds').value=S.ds; $('k_dsmodel').value=S.dsmodel; $('k_dsurl').value=S.dsurl; $('k_ant').value=S.ant; $('k_model').value=S.model; modal.classList.add('on'); };
 $('closeModal').onclick=()=>modal.classList.remove('on');
 $('saveKeys').onclick=()=>{
+  localStorage.setItem('sk_ds',$('k_ds').value.trim());
+  localStorage.setItem('sk_dsmodel',$('k_dsmodel').value.trim()||'deepseek-chat');
+  localStorage.setItem('sk_dsurl',$('k_dsurl').value.trim()||'https://api.deepseek.com/chat/completions');
   localStorage.setItem('sk_ant',$('k_ant').value.trim());
   localStorage.setItem('sk_model',$('k_model').value);
-  localStorage.setItem('sk_ds',$('k_ds').value.trim());
-  localStorage.setItem('sk_dsurl',$('k_dsurl').value.trim()||'https://api.deepseek.com/chat/completions');
   modal.classList.remove('on'); syncSettingsBtn();
 };
 syncSettingsBtn();
@@ -181,7 +185,12 @@ function fail(msg){ const e=$('err'); e.textContent=msg; e.classList.add('on'); 
 function fingerprint(ctx24, canvas){
   ctx24.drawImage(canvas,0,0,24,24);
   const d=ctx24.getImageData(0,0,24,24).data, fp=new Float32Array(576);
-  for(let i=0;i<576;i++){ const j=i*4; fp[i]=(d[j]*.3+d[j+1]*.59+d[j+2]*.11); }
+  let mean=0;
+  for(let i=0;i<576;i++){ const j=i*4; const g=d[j]*.3+d[j+1]*.59+d[j+2]*.11; fp[i]=g; mean+=g; }
+  mean/=576;
+  // Remove global brightness (phone auto-exposure / glare / room light) so only
+  // on-screen content differences drive dedup, not lighting swings between frames.
+  for(let i=0;i<576;i++) fp[i]-=mean;
   return fp;
 }
 function diff(a,b){ if(!a) return 1e9; let s=0; for(let i=0;i<576;i++) s+=Math.abs(a[i]-b[i]); return s/576; }
@@ -207,7 +216,7 @@ async function extractFrames(file, onFrame){
     await new Promise((res,rej)=>{ v.onseeked=res; v.onerror=()=>rej(new Error('Seek failed mid-video.')); v.currentTime=t; });
     ctx.drawImage(v,0,0,cv.width,cv.height);
     const fp=fingerprint(ctx24,cv);
-    if(diff(lastFP,fp)>9){                       // scene changed → keep
+    if(diff(lastFP,fp)>11){                      // scene changed → keep (raised for handheld camera shake/noise)
       lastFP=fp;
       const jpg=cv.toDataURL('image/jpeg',0.72).split(',')[1];
       kept.push(jpg);
@@ -245,9 +254,9 @@ async function askDeepSeek(imagesB64){
   const r=await fetch(S.dsurl,{
     method:'POST',
     headers:{'content-type':'application/json','authorization':'Bearer '+S.ds},
-    body:JSON.stringify({model:'deepseek-chat',messages:[{role:'system',content:SYSPROMPT},{role:'user',content}],max_tokens:4096})
+    body:JSON.stringify({model:S.dsmodel,messages:[{role:'system',content:SYSPROMPT},{role:'user',content}],max_tokens:4096})
   });
-  if(!r.ok) throw new Error('DeepSeek '+r.status);
+  if(!r.ok) throw new Error('DeepSeek '+r.status+': '+(await r.text()).slice(0,200));
   const d=await r.json();
   return d.choices[0].message.content;
 }
@@ -258,10 +267,11 @@ function parseJSON(text){
 }
 
 async function answerBatch(imgs){
-  try{ return parseJSON(await askClaude(imgs)); }
+  try{ return parseJSON(await askDeepSeek(imgs)); }
   catch(e1){
-    console.warn('Claude failed, trying DeepSeek:',e1.message);
-    try{ return parseJSON(await askDeepSeek(imgs)); }
+    if(!S.ant) throw e1;               // no fallback configured
+    console.warn('DeepSeek failed, trying Anthropic:',e1.message);
+    try{ return parseJSON(await askClaude(imgs)); }
     catch(e2){ console.warn('Fallback failed:',e2.message); throw e1; }
   }
 }
@@ -286,7 +296,7 @@ const BATCH=8, PARALLEL=4;
 
 $('go').onclick=async()=>{
   if(!videoFile) return;
-  if(!S.ant){ modal.classList.add('on'); return; }
+  if(!S.ds){ modal.classList.add('on'); return; }
   $('go').disabled=true; $('err').classList.remove('on');
   $('results').innerHTML=''; $('summary').classList.remove('on');
   const strip=$('strip'); strip.innerHTML=''; strip.classList.add('on');
