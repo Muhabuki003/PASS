@@ -122,7 +122,7 @@
     <ol class="hint">
       <li>Capture the questions any way you like: <b>record a video</b> while scrolling, <b>snap photos</b> (upload as many as you want), or use the built-in <b>auto-snapper</b> that takes one shot per second. Angled or off-axis shots are fine — the vision model corrects for perspective.</li>
       <li>Upload the video/photos below, or tap <b>Auto-snap camera</b> and let it capture for you.</li>
-      <li>Everything is batched to <b>Google Gemini Flash</b>, which reads the questions and answers straight from the images. DeepSeek can optionally double-check the answers.</li>
+      <li>Everything is batched to <b>Google Gemini Flash</b>, which reads the questions and answers straight from the images. DeepSeek or Claude can optionally double-check the answers.</li>
     </ol>
   </div>
 </div>
@@ -165,7 +165,16 @@
     <input id="k_dsmodel" placeholder="deepseek-chat">
     <label>DeepSeek endpoint</label>
     <input id="k_dsurl" placeholder="https://api.deepseek.com/chat/completions">
-    <div class="toggle"><input type="checkbox" id="k_refine"><label for="k_refine" style="margin:0">Refine answers with DeepSeek after extraction</label></div>
+
+    <label>Claude API key (optional)</label>
+    <input id="k_claude" placeholder="sk-ant-..." autocomplete="off">
+
+    <label>Refine answers with</label>
+    <select id="k_refineengine">
+      <option value="none">None</option>
+      <option value="deepseek">DeepSeek (second pass)</option>
+      <option value="claude">Claude Fable (second pass)</option>
+    </select>
 
     <div class="rowbtns">
       <button class="ghost" id="closeModal">Cancel</button>
@@ -193,7 +202,8 @@ const S = {
   get ds(){return localStorage.getItem('sk_ds')||''},
   get dsmodel(){return localStorage.getItem('sk_dsmodel')||'deepseek-chat'},
   get dsurl(){return localStorage.getItem('sk_dsurl')||'https://api.deepseek.com/chat/completions'},
-  get refine(){return localStorage.getItem('sk_refine')==='1'},
+  get claude(){return localStorage.getItem('sk_claude')||''},
+  get refineengine(){return localStorage.getItem('sk_refineengine')||'none'},
 };
 const $ = id=>document.getElementById(id);
 const modal=$('modal');
@@ -201,7 +211,7 @@ function syncSettingsBtn(){ $('settingsBtn').classList.toggle('warn', !S.gem); }
 $('settingsBtn').onclick=()=>{
   $('k_gem').value=S.gem; $('k_gemmodel').value=S.gemmodel;
   $('k_ds').value=S.ds; $('k_dsmodel').value=S.dsmodel; $('k_dsurl').value=S.dsurl;
-  $('k_refine').checked=S.refine;
+  $('k_claude').value=S.claude; $('k_refineengine').value=S.refineengine;
   modal.classList.add('on');
 };
 $('closeModal').onclick=()=>modal.classList.remove('on');
@@ -211,7 +221,8 @@ $('saveKeys').onclick=()=>{
   localStorage.setItem('sk_ds',$('k_ds').value.trim());
   localStorage.setItem('sk_dsmodel',$('k_dsmodel').value.trim()||'deepseek-chat');
   localStorage.setItem('sk_dsurl',$('k_dsurl').value.trim()||'https://api.deepseek.com/chat/completions');
-  localStorage.setItem('sk_refine',$('k_refine').checked?'1':'0');
+  localStorage.setItem('sk_claude',$('k_claude').value.trim());
+  localStorage.setItem('sk_refineengine',$('k_refineengine').value);
   modal.classList.remove('on'); syncSettingsBtn();
 };
 syncSettingsBtn();
@@ -362,6 +373,35 @@ async function refineWithDeepSeek(list){
   return parseJSON(d.choices[0].message.content);
 }
 
+/* Claude Fable — optional second pass; re-checks/refines the answers from extracted text */
+async function askClaude(list){
+  if(!S.claude) throw new Error('no Claude API key configured');
+  const payload=JSON.stringify(list.map(q=>({question:q.question,options:q.options})));
+  const r=await fetch('https://api.anthropic.com/v1/messages',{
+    method:'POST',
+    headers:{
+      'content-type':'application/json',
+      'x-api-key':S.claude,
+      'anthropic-version':'2023-06-01',
+      'anthropic-dangerous-direct-browser-access':'true',
+      'anthropic-beta':'server-side-fallback-2026-06-01'
+    },
+    body:JSON.stringify({
+      model:'claude-fable-5',
+      max_tokens:4096,
+      output_config:{effort:'low'},
+      fallbacks:[{model:'claude-opus-4-8'}],
+      system:'You are given multiple-choice questions with their options as a JSON array. For each, determine the single correct answer key. Respond with ONLY a JSON array in the SAME order and length as the input, each item: {"answer":"A","confidence":0.0-1.0}. No prose, no markdown fences.',
+      messages:[{role:'user',content:payload}]
+    })
+  });
+  if(!r.ok) throw new Error('Claude '+r.status+': '+(await r.text()).slice(0,200));
+  const d=await r.json();
+  if(d.stop_reason==='refusal') throw new Error('Claude declined the request'+(d.stop_details&&d.stop_details.explanation?': '+d.stop_details.explanation:''));
+  const textBlock=(d.content||[]).find(b=>b.type==='text');
+  return parseJSON(textBlock?textBlock.text:'');
+}
+
 function parseJSON(text){
   const m=String(text||'').match(/\[[\s\S]*\]/); if(!m) return [];
   try{ return JSON.parse(m[0]); }catch{ return []; }
@@ -445,12 +485,14 @@ async function runAnalysis(frames){
     return fail(firstErr ? 'All batches failed. '+firstErr.message : 'No questions detected in the recording.');
   }
 
-  /* optional DeepSeek refinement pass */
+  /* optional second-pass refinement (DeepSeek or Claude Fable) */
   let refineNote='';
-  if(S.refine && S.ds){
-    phase('refining with DeepSeek…'); bar(0.9);
+  const ENGINES={deepseek:{name:'DeepSeek',key:S.ds,fn:refineWithDeepSeek}, claude:{name:'Claude',key:S.claude,fn:askClaude}};
+  const engine=ENGINES[S.refineengine];
+  if(engine && engine.key){
+    phase('refining with '+engine.name+'…'); bar(0.9);
     try{
-      const refined=await refineWithDeepSeek(list);
+      const refined=await engine.fn(list);
       if(refined.length===list.length){
         list=list.map((q,i)=>{
           const rr=refined[i];
@@ -459,8 +501,8 @@ async function runAnalysis(frames){
           }
           return q;
         });
-      } else refineNote='DeepSeek returned a mismatched result — kept Gemini answers.';
-    }catch(e){ refineNote='DeepSeek refine failed ('+e.message+') — kept Gemini answers.'; }
+      } else refineNote=engine.name+' returned a mismatched result — kept Gemini answers.';
+    }catch(e){ refineNote=engine.name+' refine failed ('+e.message+') — kept Gemini answers.'; }
   }
 
   /* render */
